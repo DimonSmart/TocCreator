@@ -173,7 +173,13 @@ public sealed record StructuralScanState
 /// <summary>Pointer-bearing local context used by older non-heading semantic operations and application diagnostics.</summary>
 public sealed record SemanticPointer(string PointerId, string Text, int GlobalPosition);
 
-public sealed class SemanticWindowFailureException(string message, Exception? innerException = null) : InvalidDataException(message, innerException);
+public sealed class SemanticWindowFailureException : InvalidDataException
+{
+    public SemanticWindowFailureException(string message, Exception? innerException = null)
+        : base(message, innerException)
+    {
+    }
+}
 
 /// <summary>Diagnostics are operational evidence and never become structural annotations.</summary>
 public sealed record SemanticDecisionDiagnostic(

@@ -92,7 +92,7 @@ public sealed class StreamingStructuralScanTests
         Assert.Equal("Chapter A", Assert.Single(verifierRequests[1].Breadcrumbs).Text);
         Assert.Equal(
             [1, 2],
-            state.AcceptedAnnotations.Where(annotation => annotation.Role == StructuralRole.Heading).Select(annotation => annotation.HeadingLevel));
+            state.AcceptedAnnotations.Where(annotation => annotation.Role == StructuralRole.Heading).Select(annotation => annotation.HeadingLevel!.Value));
     }
 
     [Fact]
