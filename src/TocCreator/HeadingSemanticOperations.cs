@@ -158,7 +158,7 @@ public static class HeadingSemanticResultValidator
         ArgumentNullException.ThrowIfNull(result);
         if (result.Accept)
         {
-            if (result.Level is < 1 or > 3)
+            if (result.Level is null or < 1 or > 3)
             {
                 throw new ArgumentException("An accepted heading must have level 1 through 3.", nameof(result));
             }
