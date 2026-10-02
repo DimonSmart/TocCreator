@@ -41,9 +41,13 @@ public static class Program
 
         if (args is ["recover", var recoverySnapshotPath, var statePath, var recoveryAnnotationsPath, var diagnosticsPath, var recoveryOutputPath, var endpoint, var model, var apiKey])
         {
-            var profile = new OpenAICompatibleModelProfile("cli", new Uri(endpoint, UriKind.Absolute), model, new OpenAICompatibleCredentials(apiKey));
-            using var httpClient = new HttpClient();
-            httpClient.Timeout = Timeout.InfiniteTimeSpan;
+            var profile = new OpenAICompatibleModelProfile(
+                "cli",
+                new Uri(endpoint, UriKind.Absolute),
+                model,
+                new OpenAICompatibleCredentials(apiKey));
+
+            using var httpClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
             var command = new StructuralRecoveryCommand(
                 store,
                 new StructuralScanStateStore(),
@@ -52,19 +56,38 @@ public static class Program
                 new StreamingStructuralScanner(logger: loggerFactory.CreateLogger<StreamingStructuralScanner>()),
                 new MarkdownExporter(loggerFactory.CreateLogger<MarkdownExporter>()),
                 loggerFactory.CreateLogger<StructuralRecoveryCommand>());
+
+            var headingExecutors = new HeadingScanSemanticExecutors(
+                new HeadingCandidateDetectionExecutor(
+                    profile,
+                    new OpenAICompatibleHeadingCandidateDetectionProvider(httpClient)),
+                new HeadingCandidateVerificationExecutor(
+                    profile,
+                    new OpenAICompatibleHeadingCandidateVerificationProvider(httpClient)));
+
+            var semanticExecutors = new StructuralRecoverySemanticExecutors(
+                new TocDetectionExecutor(profile, new OpenAICompatibleTocDetectionProvider(httpClient)),
+                new TocParsingExecutor(profile, new OpenAICompatibleTocParsingProvider(httpClient)),
+                new AmbiguousHeadingMatchExecutor(profile, new OpenAICompatibleAmbiguousHeadingMatchProvider(httpClient)),
+                new AmbiguousNoiseClassificationExecutor(profile, new OpenAICompatibleAmbiguousNoiseClassificationProvider(httpClient)),
+                new ValidatedAnomalyReviewExecutor(profile, new OpenAICompatibleValidatedAnomalyReviewProvider(httpClient)));
+
             await command.ExecuteAsync(
-                new StructuralRecoveryOptions(recoverySnapshotPath, statePath, recoveryAnnotationsPath, diagnosticsPath, recoveryOutputPath, profile, new StructuralScanOptions(16)),
-                new LocalWindowHeadingDecisionExecutor(profile, new OpenAICompatibleWindowHeadingDecisionProvider(httpClient)),
-                new StructuralRecoverySemanticExecutors(
-                    new TocDetectionExecutor(profile, new OpenAICompatibleTocDetectionProvider(httpClient)),
-                    new TocParsingExecutor(profile, new OpenAICompatibleTocParsingProvider(httpClient)),
-                    new AmbiguousHeadingMatchExecutor(profile, new OpenAICompatibleAmbiguousHeadingMatchProvider(httpClient)),
-                    new AmbiguousNoiseClassificationExecutor(profile, new OpenAICompatibleAmbiguousNoiseClassificationProvider(httpClient)),
-                    new ValidatedAnomalyReviewExecutor(profile, new OpenAICompatibleValidatedAnomalyReviewProvider(httpClient))));
+                new StructuralRecoveryOptions(
+                    recoverySnapshotPath,
+                    statePath,
+                    recoveryAnnotationsPath,
+                    diagnosticsPath,
+                    recoveryOutputPath,
+                    profile,
+                    new StructuralScanOptions()),
+                headingExecutors,
+                semanticExecutors);
             return 0;
         }
 
-        Console.Error.WriteLine("Usage: TocCreator import <input.txt> <snapshot.json> | export <snapshot.json> <output.md> [annotations.json] | recover <snapshot.json> <state.json> <annotations.json> <diagnostics.json> <output.md> <endpoint> <model> <api-key>");
+        Console.Error.WriteLine(
+            "Usage: TocCreator import <input.txt> <snapshot.json> | export <snapshot.json> <output.md> [annotations.json] | recover <snapshot.json> <state.json> <annotations.json> <diagnostics.json> <output.md> <endpoint> <model> <api-key>");
         return 1;
     }
 }

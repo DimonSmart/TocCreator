@@ -16,8 +16,8 @@ public sealed record StructuralRecoveryOptions(
     StructuralRecoveryRepairOptions? RepairOptions = null);
 
 /// <summary>
-/// Runs deterministic TOC discovery, then resumes or completes the application-owned
-/// structural scan. The semantic provider is used only by the scanner.
+/// Runs deterministic/typed TOC discovery, then resumes or completes the application-owned
+/// two-stage streaming heading scan.
 /// </summary>
 public sealed class StructuralRecoveryCommand(
     SnapshotStore snapshotStore,
@@ -28,26 +28,28 @@ public sealed class StructuralRecoveryCommand(
     MarkdownExporter markdownExporter,
     ILogger<StructuralRecoveryCommand> logger)
 {
-    public async Task ExecuteAsync(StructuralRecoveryOptions options, IStructuralDecisionExecutor executor, CancellationToken cancellationToken = default)
-        => await ExecuteCoreAsync(options, executor, null, cancellationToken);
-
-    public async Task ExecuteAsync(StructuralRecoveryOptions options, IStructuralDecisionExecutor windowHeadingExecutor, StructuralRecoverySemanticExecutors semanticExecutors, CancellationToken cancellationToken = default)
-        => await ExecuteCoreAsync(options, windowHeadingExecutor, semanticExecutors, cancellationToken);
-
-    private async Task ExecuteCoreAsync(StructuralRecoveryOptions options, IStructuralDecisionExecutor executor, StructuralRecoverySemanticExecutors? semanticExecutors, CancellationToken cancellationToken)
+    public async Task ExecuteAsync(
+        StructuralRecoveryOptions options,
+        HeadingScanSemanticExecutors headingExecutors,
+        StructuralRecoverySemanticExecutors? semanticExecutors = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(executor);
+        ArgumentNullException.ThrowIfNull(headingExecutors);
         options.ScanOptions.Validate();
 
         logger.LogInformation("Starting structural recovery for snapshot {SnapshotPath}.", options.SnapshotPath);
         var snapshot = await snapshotStore.LoadAsync(options.SnapshotPath, cancellationToken);
         var diagnostics = new JsonFileSemanticDiagnosticSink(options.DiagnosticsPath);
+
         StructuralScanState state;
         if (File.Exists(options.StatePath))
         {
             state = await stateStore.LoadAsync(options.StatePath, cancellationToken);
-            logger.LogInformation("Resuming structural scan at cursor {Cursor} and committed boundary {CommittedBoundary}.", state.Cursor, state.CommittedBoundary);
+            logger.LogInformation(
+                "Resuming structural scan at cursor {Cursor} and committed boundary {CommittedBoundary}.",
+                state.Cursor,
+                state.CommittedBoundary);
         }
         else
         {
@@ -56,27 +58,53 @@ public sealed class StructuralRecoveryCommand(
                 : await discovery.DiscoverAsync(snapshot, semanticExecutors, diagnostics, cancellationToken);
             state = StructuralScanState.Start(snapshot, tocDiscovery);
             await stateStore.SaveAsync(options.StatePath, state, cancellationToken);
-            logger.LogInformation("Created structural scan state from deterministic TOC discovery with {TocEntryCount} entries.", tocDiscovery.Entries.Count);
+            logger.LogInformation(
+                "Created structural scan state from TOC discovery with {TocEntryCount} entries.",
+                tocDiscovery.Entries.Count);
         }
 
         if (state.Checkpoint == StructuralRecoveryCheckpoint.Scanning)
         {
-            state = await scanner.ScanToCompletionAsync(snapshot, state, options.ScanOptions, executor, stateStore, options.StatePath, diagnostics, cancellationToken: cancellationToken);
+            state = await scanner.ScanToCompletionAsync(
+                snapshot,
+                state,
+                options.ScanOptions,
+                headingExecutors,
+                stateStore,
+                options.StatePath,
+                diagnostics,
+                cancellationToken: cancellationToken);
             state = state with { Checkpoint = StructuralRecoveryCheckpoint.StructuralValidation };
             await stateStore.SaveAsync(options.StatePath, state, cancellationToken);
         }
+
         if (state.Checkpoint == StructuralRecoveryCheckpoint.StructuralValidation)
         {
             var repair = new StructuralRecoveryRepairWorkflow(new StructuralRecoveryValidator());
-            state = await repair.ValidateAndRepairAsync(snapshot, state, options.RepairOptions ?? new StructuralRecoveryRepairOptions(), semanticExecutors?.AnomalyReview, stateStore, options.StatePath, diagnostics, cancellationToken);
+            state = await repair.ValidateAndRepairAsync(
+                snapshot,
+                state,
+                options.RepairOptions ?? new StructuralRecoveryRepairOptions(),
+                semanticExecutors?.AnomalyReview,
+                stateStore,
+                options.StatePath,
+                diagnostics,
+                cancellationToken);
             state = state with { Checkpoint = StructuralRecoveryCheckpoint.Completed };
             await stateStore.SaveAsync(options.StatePath, state, cancellationToken);
         }
 
         var annotations = new AnnotationSet(state.AcceptedAnnotations);
         await annotationStore.SaveAsync(options.AnnotationsPath, annotations, cancellationToken);
-        await File.WriteAllBytesAsync(options.MarkdownPath, markdownExporter.Export(snapshot, annotations), cancellationToken);
-        logger.LogInformation("Completed structural recovery with {AnnotationCount} annotations and {DiagnosticCount} semantic diagnostics.", annotations.Items.Count, diagnostics.Count);
+        await File.WriteAllBytesAsync(
+            options.MarkdownPath,
+            markdownExporter.Export(snapshot, annotations),
+            cancellationToken);
+
+        logger.LogInformation(
+            "Completed structural recovery with {AnnotationCount} annotations and {DiagnosticCount} semantic diagnostics.",
+            annotations.Items.Count,
+            diagnostics.Count);
     }
 }
 
@@ -105,8 +133,10 @@ public sealed class JsonFileSemanticDiagnosticSink : ISemanticDiagnosticSink, IS
 
     public void Record(SemanticDecisionDiagnostic diagnostic)
     {
-        // Retaining model transcripts requires an explicit debug-only path; recovery files stay safe by default.
-        diagnostics.Add(JsonSerializer.SerializeToElement(diagnostic with { RawPrompt = null, RawResponse = null }, JsonOptions));
+        // Recovery diagnostics remain safe by default even if a debug-capable executor supplied raw messages.
+        diagnostics.Add(JsonSerializer.SerializeToElement(
+            diagnostic with { RawPrompt = null, RawResponse = null },
+            JsonOptions));
         File.WriteAllText(path, JsonSerializer.Serialize(diagnostics, JsonOptions));
     }
 

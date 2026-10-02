@@ -14,6 +14,8 @@ public enum SemanticOperationKind
     TocParsing,
     AmbiguousHeadingMatch,
     AmbiguousNoiseClassification,
+    WindowHeadingCandidateDetection,
+    HeadingCandidateVerification,
     ValidatedAnomalyReview
 }
 
@@ -77,6 +79,9 @@ public abstract class OpenAICompatibleSemanticProvider<TRequest, TResult>
         this.operation = operation;
     }
 
+    protected virtual string SystemPrompt =>
+        $"Perform only the {operation} judgment on the supplied local context. Return the requested JSON result.";
+
     protected async Task<SemanticProviderResponse<TResult>> SendAsync(SemanticProviderRequest<TRequest> request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -110,7 +115,7 @@ public abstract class OpenAICompatibleSemanticProvider<TRequest, TResult>
             ["model"] = request.Profile.Model,
             ["messages"] = new[]
             {
-                new { role = "system", content = $"Perform only the {operation} judgment on the supplied local context. Return the requested JSON result." },
+                new { role = "system", content = SystemPrompt },
                 new { role = "user", content = JsonSerializer.Serialize(request.Input, JsonOptions) }
             }
         };
