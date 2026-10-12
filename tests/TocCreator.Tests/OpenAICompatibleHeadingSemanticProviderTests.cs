@@ -10,15 +10,16 @@ public sealed class OpenAICompatibleHeadingSemanticProviderTests
     [Fact]
     public async Task Candidate_detector_sends_contextual_model_visible_payload_without_stable_ids()
     {
-        var handler = new RecordingHandler(ChatResponse("""{"candidates":[2]}"""));
+        var handler = new RecordingHandler(ChatResponse("""{"candidates":["SP2"]}"""));
         var profile = Profile(temperature: 0.2f);
         var provider = new OpenAICompatibleHeadingCandidateDetectionProvider(new HttpClient(handler));
         var request = new HeadingCandidateDetectionRequest(
-            [new SemanticBreadcrumb(1, "Chapter One")],
+            [new SemanticBreadcrumb(1, "Глава первая")],
             [new HeadingContextParagraph("previous body", 10)],
             [
                 new HeadingDecisionParagraph(1, "ordinary body", true, null, null, 11),
-                new HeadingDecisionParagraph(2, "SECTION", true, null, null, 12)
+                new HeadingDecisionParagraph(2, "ГЛАВА", true, null, null, 12),
+                new HeadingDecisionParagraph(3, "", true, null, null, 13)
             ],
             [new HeadingContextParagraph("following body", 13)],
             100);
@@ -36,14 +37,22 @@ public sealed class OpenAICompatibleHeadingSemanticProviderTests
         Assert.Equal("json_schema", handler.Body.RootElement.GetProperty("response_format").GetProperty("type").GetString());
 
         var system = handler.Body.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!;
-        Assert.Contains("recall", system, StringComparison.OrdinalIgnoreCase);
-        var input = JsonDocument.Parse(handler.Body.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!);
-        Assert.Equal("previous body", input.RootElement.GetProperty("paragraphsBefore")[0].GetProperty("text").GetString());
-        Assert.Equal("ordinary body", input.RootElement.GetProperty("paragraphs")[0].GetProperty("text").GetString());
-        Assert.Equal("following body", input.RootElement.GetProperty("paragraphsAfter")[0].GetProperty("text").GetString());
-        Assert.Equal("Chapter One", input.RootElement.GetProperty("breadcrumbs")[0].GetProperty("text").GetString());
-        Assert.DoesNotContain("pointerId", input.RootElement.GetRawText(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("p000000", input.RootElement.GetRawText(), StringComparison.Ordinal);
+        Assert.Contains("Only text preceded by an [SP<number>] marker", system, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("empty candidates array", system, StringComparison.OrdinalIgnoreCase);
+        var input = handler.Body.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+        Assert.Contains("CONFIRMED STRUCTURE", input, StringComparison.Ordinal);
+        Assert.Contains("Level 1: Глава первая", input, StringComparison.Ordinal);
+        Assert.Contains("READ-ONLY CONTEXT BEFORE", input, StringComparison.Ordinal);
+        Assert.Contains("previous body", input, StringComparison.Ordinal);
+        Assert.Contains("[SP1] ordinary body", input, StringComparison.Ordinal);
+        Assert.Contains("[SP2] ГЛАВА", input, StringComparison.Ordinal);
+        Assert.DoesNotContain("[SP3]", input, StringComparison.Ordinal);
+        Assert.Contains("READ-ONLY CONTEXT AFTER", input, StringComparison.Ordinal);
+        Assert.Contains("following body", input, StringComparison.Ordinal);
+        Assert.DoesNotContain("pointerId", input, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("p000000", input, StringComparison.Ordinal);
+        Assert.Contains("Глава первая", handler.RawBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\u0413", handler.RawBody, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -175,6 +184,7 @@ public sealed class OpenAICompatibleHeadingSemanticProviderTests
         public string? AuthorizationScheme { get; private set; }
         public string? AuthorizationParameter { get; private set; }
         public string? RequestUri { get; private set; }
+        public string RawBody { get; private set; } = string.Empty;
         public JsonDocument Body { get; private set; } = null!;
 
         protected override async Task<HttpResponseMessage> SendAsync(
@@ -184,7 +194,8 @@ public sealed class OpenAICompatibleHeadingSemanticProviderTests
             AuthorizationScheme = request.Headers.Authorization?.Scheme;
             AuthorizationParameter = request.Headers.Authorization?.Parameter;
             RequestUri = request.RequestUri!.ToString();
-            Body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            RawBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+            Body = JsonDocument.Parse(RawBody);
             return new HttpResponseMessage(statusCode)
             {
                 Content = new StringContent(responseBody, Encoding.UTF8, "application/json")

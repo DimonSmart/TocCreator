@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Agents.AI.Workflows;
@@ -65,10 +66,20 @@ public interface IAmbiguousHeadingMatchProvider { Task<SemanticProviderResponse<
 public interface IAmbiguousNoiseClassificationProvider { Task<SemanticProviderResponse<AmbiguousNoiseClassificationResult>> DecideAsync(SemanticProviderRequest<AmbiguousNoiseClassificationRequest> request, CancellationToken cancellationToken = default); }
 public interface IValidatedAnomalyReviewProvider { Task<SemanticProviderResponse<ValidatedAnomalyReviewResult>> DecideAsync(SemanticProviderRequest<ValidatedAnomalyReviewRequest> request, CancellationToken cancellationToken = default); }
 
+public interface ISemanticDecisionIdentity
+{
+    string ProfileName { get; }
+    string Model { get; }
+}
+
 /// <summary>Common OpenAI-compatible transport; subclasses expose operation-specific typed contracts.</summary>
 public abstract class OpenAICompatibleSemanticProvider<TRequest, TResult>
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
+    protected static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        Converters = { new JsonStringEnumConverter() }
+    };
     private readonly HttpClient httpClient;
     private readonly SemanticOperationKind operation;
 
@@ -82,13 +93,24 @@ public abstract class OpenAICompatibleSemanticProvider<TRequest, TResult>
     protected virtual string SystemPrompt =>
         $"Perform only the {operation} judgment on the supplied local context. Return the requested JSON result.";
 
+    protected virtual object CreateModelInput(TRequest input) => input!;
+
+    protected virtual string CreateModelContent(TRequest input) =>
+        JsonSerializer.Serialize(CreateModelInput(input), JsonOptions);
+
+    protected virtual TResult DeserializeResult(string content) =>
+        JsonSerializer.Deserialize<TResult>(content, JsonOptions)
+        ?? throw new InvalidDataException("OpenAI-compatible response contains no typed result.");
+
     protected async Task<SemanticProviderResponse<TResult>> SendAsync(SemanticProviderRequest<TRequest> request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         request.Profile.Validate();
         using var message = new HttpRequestMessage(HttpMethod.Post, new Uri(request.Profile.Endpoint, "chat/completions"));
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", request.Profile.Credentials.ApiKey);
-        message.Content = JsonContent.Create(CreateRequestBody(request), options: JsonOptions);
+        var requestBody = CreateRequestBody(request);
+        var rawPrompt = JsonSerializer.Serialize(requestBody, JsonOptions);
+        message.Content = JsonContent.Create(requestBody, options: JsonOptions);
         using var response = await httpClient.SendAsync(message, cancellationToken);
         if (!response.IsSuccessStatusCode)
             throw new HttpRequestException($"OpenAI-compatible request failed with status code {(int)response.StatusCode}.", null, response.StatusCode);
@@ -101,7 +123,7 @@ public abstract class OpenAICompatibleSemanticProvider<TRequest, TResult>
             if (choices.GetArrayLength() == 0) throw new InvalidDataException("OpenAI-compatible response contains no choices.");
             var content = choices[0].GetProperty("message").GetProperty("content").GetString();
             if (string.IsNullOrWhiteSpace(content)) throw new InvalidDataException("OpenAI-compatible response has no structured content.");
-            return new SemanticProviderResponse<TResult>(JsonSerializer.Deserialize<TResult>(content, JsonOptions) ?? throw new InvalidDataException("OpenAI-compatible response contains no typed result."), null, rawResponse);
+            return new SemanticProviderResponse<TResult>(DeserializeResult(content), rawPrompt, rawResponse);
         }
         catch (JsonException exception) { throw new InvalidDataException("OpenAI-compatible response is not valid structured JSON.", exception); }
         catch (KeyNotFoundException exception) { throw new InvalidDataException("OpenAI-compatible response does not match the chat-completions contract.", exception); }
@@ -116,7 +138,7 @@ public abstract class OpenAICompatibleSemanticProvider<TRequest, TResult>
             ["messages"] = new[]
             {
                 new { role = "system", content = SystemPrompt },
-                new { role = "user", content = JsonSerializer.Serialize(request.Input, JsonOptions) }
+                new { role = "user", content = CreateModelContent(request.Input) }
             }
         };
         if (request.Profile.SupportsTemperature && request.Profile.Temperature is not null) body["temperature"] = request.Profile.Temperature;

@@ -33,4 +33,29 @@ public sealed class MarkdownExporter(ILogger<MarkdownExporter> logger)
         logger.LogInformation("Completed Markdown export with {ByteCount} bytes.", markdown.Length);
         return markdown;
     }
+
+    public byte[] ExportConfirmedHeadings(SourceSnapshot snapshot, AnnotationSet annotations)
+    {
+        var source = snapshot.GetSourceBytes();
+        var output = new StringBuilder();
+
+        foreach (var pointer in snapshot.Pointers)
+        {
+            var annotation = annotations.GetOrBody(pointer.Id);
+            if (annotation.Role != StructuralRole.Heading)
+            {
+                continue;
+            }
+
+            var text = Utf8.GetString(source, checked((int)pointer.Span.ByteStart), pointer.Span.ByteLength)
+                .Trim()
+                .TrimStart('#')
+                .TrimStart();
+            output.Append('#', annotation.HeadingLevel!.Value)
+                .Append(' ')
+                .AppendLine(text);
+        }
+
+        return Utf8.GetBytes(output.ToString());
+    }
 }

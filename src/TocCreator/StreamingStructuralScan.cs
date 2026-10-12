@@ -173,7 +173,7 @@ public sealed record StructuralScanState
 /// <summary>Pointer-bearing local context used by older non-heading semantic operations and application diagnostics.</summary>
 public sealed record SemanticPointer(string PointerId, string Text, int GlobalPosition);
 
-public sealed class SemanticWindowFailureException : InvalidDataException
+public sealed class SemanticWindowFailureException : IOException
 {
     public SemanticWindowFailureException(string message, Exception? innerException = null)
         : base(message, innerException)
@@ -324,10 +324,24 @@ public sealed class StreamingStructuralScanner
                 HeadingLevel = verifierResult.Level!.Value
             };
             additions.Add(annotation);
+            var headingText = string.Join(' ', PointerText(snapshot, globalIndex).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            logger.LogInformation(
+                "Confirmed heading: level {HeadingLevel}, pointer {PointerId}, text: {HeadingText}",
+                annotation.HeadingLevel,
+                pointerId,
+                headingText);
             UpdateStack(temporaryStack, new HeadingStackItem(pointerId, annotation.HeadingLevel.Value));
         }
 
-        return Commit(snapshot, state, window.DecisionEndExclusive - 1, additions, warnings);
+        var committedState = Commit(snapshot, state, window.DecisionEndExclusive - 1, additions, warnings);
+        logger.LogInformation(
+            "Committed window {Start}..{End}; confirmed {HeadingCount} headings; progress {Cursor}/{TotalPointers}",
+            window.DecisionStart,
+            window.DecisionEndExclusive - 1,
+            additions.Count,
+            committedState.Cursor,
+            snapshot.Pointers.Count);
+        return committedState;
     }
 
     public async Task<StructuralScanState> ScanToCompletionAsync(
@@ -339,6 +353,7 @@ public sealed class StreamingStructuralScanner
         string? statePath = null,
         ISemanticDiagnosticSink? diagnostics = null,
         SemanticDiagnosticOptions? diagnosticOptions = null,
+        Func<StructuralScanState, CancellationToken, Task>? onWindowCommitted = null,
         CancellationToken cancellationToken = default)
     {
         while (state.Cursor < snapshot.Pointers.Count)
@@ -361,6 +376,11 @@ public sealed class StreamingStructuralScanner
             if (store is not null && statePath is not null)
             {
                 await store.SaveAsync(statePath, state, cancellationToken);
+            }
+
+            if (onWindowCommitted is not null)
+            {
+                await onWindowCommitted(state, cancellationToken);
             }
         }
 
@@ -418,11 +438,11 @@ public sealed class StreamingStructuralScanner
                     attempt,
                     stopwatch.Elapsed);
                 logger.LogWarning(
-                    exception,
-                    "Heading candidate detection attempt {Attempt} failed for window {Start} through {End}.",
+                    "Heading candidate detection attempt {Attempt} was rejected for window {Start} through {End}: {Reason}",
                     attempt + 1,
                     window.DecisionStart,
-                    window.DecisionEndExclusive - 1);
+                    window.DecisionEndExclusive - 1,
+                    exception.Message);
             }
         }
 
@@ -479,10 +499,10 @@ public sealed class StreamingStructuralScanner
                     attempt,
                     stopwatch.Elapsed);
                 logger.LogWarning(
-                    exception,
-                    "Heading verification attempt {Attempt} failed for candidate {PointerId}.",
+                    "Heading verification attempt {Attempt} was rejected for candidate {PointerId}: {Reason}",
                     attempt + 1,
-                    candidatePointerId);
+                    candidatePointerId,
+                    exception.Message);
             }
         }
 

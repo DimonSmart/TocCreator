@@ -13,7 +13,8 @@ public sealed record StructuralRecoveryOptions(
     string MarkdownPath,
     OpenAICompatibleModelProfile Profile,
     StructuralScanOptions ScanOptions,
-    StructuralRecoveryRepairOptions? RepairOptions = null);
+    StructuralRecoveryRepairOptions? RepairOptions = null,
+    string? ConfirmedHeadingsMarkdownPath = null);
 
 /// <summary>
 /// Runs deterministic/typed TOC discovery, then resumes or completes the application-owned
@@ -41,6 +42,8 @@ public sealed class StructuralRecoveryCommand(
         logger.LogInformation("Starting structural recovery for snapshot {SnapshotPath}.", options.SnapshotPath);
         var snapshot = await snapshotStore.LoadAsync(options.SnapshotPath, cancellationToken);
         var diagnostics = new JsonFileSemanticDiagnosticSink(options.DiagnosticsPath);
+        var confirmedHeadingsPath = options.ConfirmedHeadingsMarkdownPath
+            ?? Path.ChangeExtension(options.MarkdownPath, ".confirmed-headings.md");
 
         StructuralScanState state;
         if (File.Exists(options.StatePath))
@@ -63,6 +66,8 @@ public sealed class StructuralRecoveryCommand(
                 tocDiscovery.Entries.Count);
         }
 
+        await WriteConfirmedHeadingsAsync(snapshot, state, confirmedHeadingsPath, cancellationToken);
+
         if (state.Checkpoint == StructuralRecoveryCheckpoint.Scanning)
         {
             state = await scanner.ScanToCompletionAsync(
@@ -73,10 +78,14 @@ public sealed class StructuralRecoveryCommand(
                 stateStore,
                 options.StatePath,
                 diagnostics,
+                new SemanticDiagnosticOptions(RetainRawModelMessages: true),
+                (committedState, token) => WriteConfirmedHeadingsAsync(snapshot, committedState, confirmedHeadingsPath, token),
                 cancellationToken: cancellationToken);
             state = state with { Checkpoint = StructuralRecoveryCheckpoint.StructuralValidation };
             await stateStore.SaveAsync(options.StatePath, state, cancellationToken);
         }
+
+        await WriteConfirmedHeadingsAsync(snapshot, state, confirmedHeadingsPath, cancellationToken);
 
         if (state.Checkpoint == StructuralRecoveryCheckpoint.StructuralValidation)
         {
@@ -106,6 +115,17 @@ public sealed class StructuralRecoveryCommand(
             annotations.Items.Count,
             diagnostics.Count);
     }
+
+    private async Task WriteConfirmedHeadingsAsync(
+        SourceSnapshot snapshot,
+        StructuralScanState state,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        var headings = new AnnotationSet(state.AcceptedAnnotations);
+        await File.WriteAllBytesAsync(path, markdownExporter.ExportConfirmedHeadings(snapshot, headings), cancellationToken);
+        logger.LogInformation("Updated confirmed headings file {ConfirmedHeadingsPath} with {HeadingCount} headings.", path, headings.Items.Count(annotation => annotation.Role == StructuralRole.Heading));
+    }
 }
 
 /// <summary>Persists structured semantic-call evidence. Raw provider messages are never retained by this sink.</summary>
@@ -134,9 +154,12 @@ public sealed class JsonFileSemanticDiagnosticSink : ISemanticDiagnosticSink, IS
     public void Record(SemanticDecisionDiagnostic diagnostic)
     {
         // Recovery diagnostics remain safe by default even if a debug-capable executor supplied raw messages.
-        diagnostics.Add(JsonSerializer.SerializeToElement(
-            diagnostic with { RawPrompt = null, RawResponse = null },
-            JsonOptions));
+        var safeDiagnostic = diagnostic with
+        {
+            RawPrompt = diagnostic.ValidationFailure is null ? null : diagnostic.RawPrompt,
+            RawResponse = diagnostic.ValidationFailure is null ? null : diagnostic.RawResponse
+        };
+        diagnostics.Add(JsonSerializer.SerializeToElement(safeDiagnostic, JsonOptions));
         File.WriteAllText(path, JsonSerializer.Serialize(diagnostics, JsonOptions));
     }
 
